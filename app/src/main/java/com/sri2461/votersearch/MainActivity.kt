@@ -137,7 +137,16 @@ class MainActivity : AppCompatActivity() {
         titles.addView(subtitle)
         top.addView(titles, LinearLayout.LayoutParams(0, -2, 1f))
         top.addView(TextView(this).apply {
-            text = "⬆  Import PDF"
+            text = "☰ Wards"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setTypeface(typeface, Typeface.BOLD)
+            background = rounded(Color.parseColor("#33FFFFFF"), 20)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            setOnClickListener { showWardList() }
+        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        top.addView(TextView(this).apply {
+            text = "⬆ Import"
             textSize = 13f
             setTextColor(PRIMARY_DARK)
             setTypeface(typeface, Typeface.BOLD)
@@ -289,6 +298,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showWardList() {
+        queryExec.execute {
+            val wards = db.wards()
+            val total = db.count()
+            runOnUiThread {
+                if (total == 0) {
+                    Toast.makeText(this, "Import a voter PDF first", Toast.LENGTH_SHORT).show()
+                } else {
+                    val labels = (listOf("All voters  ($total)") + wards.map { "${it.first}  (${it.second})" })
+                        .toTypedArray()
+                    AlertDialog.Builder(this)
+                        .setTitle("Show voters of")
+                        .setItems(labels) { _, which ->
+                            selectedWard = if (which == 0) "" else wards[which - 1].first
+                            styleChips()
+                            refresh()
+                        }
+                        .show()
+                }
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- Search / list
 
     private fun refresh() {
@@ -431,8 +463,10 @@ class MainActivity : AppCompatActivity() {
             h.badge.text = "#${v.serial}"
             h.ward.text = v.ward
             h.page.text = "Page ${v.pdfPage}"
-            h.voterId.visibility = if (v.voterId.isBlank()) View.GONE else View.VISIBLE
-            h.voterId.text = "Voter ID  ${v.voterId}"
+            val details = parseDetails(v.ocrText)
+            val idLine = if (v.voterId.isBlank()) "" else "Voter ID  ${v.voterId}"
+            h.voterId.text = listOf(idLine, details).filter { it.isNotEmpty() }.joinToString("\n")
+            h.voterId.visibility = if (h.voterId.text.isEmpty()) View.GONE else View.VISIBLE
             h.text.text = v.ocrText.ifBlank { "(no text recognised — see the card image)" }
             if (v.ward == UNASSIGNED_WARD && v.header.isNotBlank()) {
                 h.note.visibility = View.VISIBLE
@@ -464,10 +498,32 @@ class MainActivity : AppCompatActivity() {
     )
     private val voterIdRegex = Regex("[A-Z]{2,3}\\s?\\d{7}")
 
+    private val sectionRegex = Regex(
+        "(?i)(?:section|సెక్షన్|విభాగం)\\s*(?:no\\.?|నెం\\.?)?\\s*(?:and name|&\\s*name)?\\s*[:\\-–.]?\\s*(\\d{1,3})"
+    )
+
     private fun detectWard(rawHeader: String): String? {
-        val m = wardRegex.find(asciiDigits(rawHeader)) ?: return null
-        val n = m.groupValues[1].trimStart('0').ifEmpty { "0" }
-        return "Ward $n"
+        val text = asciiDigits(rawHeader)
+        wardRegex.find(text)?.let {
+            return "Ward " + it.groupValues[1].trimStart('0').ifEmpty { "0" }
+        }
+        sectionRegex.find(text)?.let {
+            return "Section " + it.groupValues[1].trimStart('0').ifEmpty { "0" }
+        }
+        return null
+    }
+
+    /** Best-effort extraction of age / gender / house number from the OCR text of a card. */
+    private fun parseDetails(raw: String): String {
+        val t = asciiDigits(raw)
+        val parts = mutableListOf<String>()
+        Regex("(?i)(?:age|వయస్సు|వయసు)\\s*[:\\-]?\\s*(\\d{2,3})").find(t)
+            ?.let { parts.add("Age " + it.groupValues[1]) }
+        Regex("(?i)\\b(female|male)\\b|(స్త్రీ|మహిళ|పురుషుడు|పురుష)").find(t)
+            ?.let { parts.add(it.value.replaceFirstChar { c -> c.uppercase() }) }
+        Regex("(?i)(?:house\\s*no\\.?|ఇంటి\\s*నెం\\.?|ఇంటి\\s*నం\\.?)\\s*[:\\-]?\\s*([A-Za-z0-9\\-/]+)").find(t)
+            ?.let { parts.add("House " + it.groupValues[1]) }
+        return parts.joinToString("  •  ")
     }
 
     private fun importPdf(uri: Uri) {
@@ -535,8 +591,11 @@ class MainActivity : AppCompatActivity() {
                     val page = renderer.openPage(pageIndex)
                     var pageBitmap: Bitmap? = null
                     try {
-                        val bitmap = Bitmap.createBitmap(page.width * 2, page.height * 2, Bitmap.Config.ARGB_8888)
+                        val bitmap = Bitmap.createBitmap(page.width * 3, page.height * 3, Bitmap.Config.ARGB_8888)
                         pageBitmap = bitmap
+                        // PdfRenderer draws on a transparent bitmap; without a white background the
+                        // page turns black (in JPEG and for OCR). Fill white first.
+                        bitmap.eraseColor(Color.WHITE)
                         page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
 
                         // 3 columns x 9 rows of voter cards.
